@@ -24,15 +24,31 @@ class TransformerDecoderLayer(nn.Module):
         self_attention (MultiHeadAttention): Masked multi-head self-attention mechanism.
         feed_forward (FeedForward): Feed-forward neural network.
     """
+    
 
     def __init__(self, d_model: int, num_attention_heads: int, intermediate_size: int):
         super(TransformerDecoderLayer, self).__init__()
-        self.layer_norm_1 = None
-        self.layer_norm_2 = None
-        self.layer_norm_3 = None
-        self.self_attention = None
         self.cross_attention = None
-        self.feed_forward = None
+
+
+        self.layer_norm_1 = torch.nn.LayerNorm(
+            d_model, eps=1e-5, elementwise_affine=True
+        )
+        self.layer_norm_2 = torch.nn.LayerNorm(
+            d_model, eps=1e-5, elementwise_affine=True
+        )
+        self.layer_norm_3 = torch.nn.LayerNorm(
+            d_model, eps=1e-5, elementwise_affine=True
+        )
+        self.attention = MultiHeadAttention(
+            d_model=d_model, num_attention_heads=num_attention_heads
+        )
+        self.cross_attention = MultiHeadAttention(
+            d_model=d_model, num_attention_heads=num_attention_heads
+        )
+        self.feed_forward = FeedForward(
+            d_model=d_model, intermediate_size=intermediate_size
+        )
 
     def forward(self, x: torch.Tensor, enc_output: torch.Tensor, tgt_mask: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Transformer decoder layer.
@@ -46,17 +62,24 @@ class TransformerDecoderLayer(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # Apply layer normalization and masked multi-head self-attention
-        hidden_state = None
-        x = None
+        hidden_state = self.layer_norm_1(x)
+        self_attn_out = self.attention(hidden_state, hidden_state, hidden_state, mask=tgt_mask)
+        x = x + self_attn_out
 
         # Apply layer normalization and cross-attention
-        hidden_state = None
-        x = None
+        hidden_state = self.layer_norm_2(x)
+        cross_attn_out = self.cross_attention(hidden_state, enc_output, enc_output, mask=None)
+        x = x + cross_attn_out
         
         # Apply layer normalization and feed-forward network
-        x = None
+        hidden_state = self.layer_norm_3(x)
+        ff_out = self.feed_forward(hidden_state)
+        x = x + ff_out
 
         return x
+    
+
+    
 
 class TransformerDecoder(nn.Module):
     """Transformer Decoder.
@@ -80,8 +103,26 @@ class TransformerDecoder(nn.Module):
     def __init__(self, vocab_size: int, max_position_embeddings: int, d_model: int,
                 num_attention_heads: int, intermediate_size: int, num_hidden_layers: int):
         super(TransformerDecoder, self).__init__()
-        self.embeddings = None
-        self.layers = None
+        self.embeddings = Embeddings(vocab_size, max_position_embeddings, d_model)
+        self.layers = nn.ModuleList(
+            [
+                TransformerDecoderLayer(
+                    d_model=d_model,
+                    num_attention_heads=num_attention_heads,
+                    intermediate_size=intermediate_size,
+                )
+                for _ in range(num_hidden_layers)
+            ]
+        )
+
+    @staticmethod
+    def _causal_mask(batch_size: int, seq_len: int, device=None) -> torch.Tensor:
+        """
+        Máscara causal booleana: True = permitido, False = bloqueado.
+        Forma: (B, T, T)
+        """
+        m = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device).tril()
+        return m.unsqueeze(0).expand(batch_size, -1, -1)
 
     def forward(self, input_ids: torch.Tensor, enc_output: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Transformer decoder.
@@ -94,14 +135,17 @@ class TransformerDecoder(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # Generate token embeddings
-        x = None
+        x = self.embeddings(input_ids)  # (batch_size, seq_len, d_model)
         batch_size, seq_len, _ = x.size()
+        device = x.device
 
         # Generate causal mask for target tensor
-        tgt_mask = None
+        tgt_mask = self._causal_mask(
+            batch_size, seq_len, device=device
+        )  # (batch_size, seq_len, seq_len), bool
 
         for layer in self.layers:
-            x = layer(x, enc_output, tgt_mask)
+            x = layer(x, enc_output, tgt_mask) # cada capa es pre-norm y usa la máscara
 
         return x
 

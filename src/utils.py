@@ -26,9 +26,9 @@ class AttentionHead(nn.Module):
     def __init__(self, d_model: int, d_k: int, d_q: int, d_v: int):
         super(AttentionHead, self).__init__()
 
-        self.wq = None
-        self.wk = None
-        self.wv = None
+        self.wq = nn.Linear(d_model, d_q, bias=False)
+        self.wk = nn.Linear(d_model, d_k, bias=False)
+        self.wv = nn.Linear(d_model, d_v, bias=False)
 
     def scaled_dot_product_attention(self, q, k, v, mask=None):
         """Calculate the attention weights with optional causal mask.
@@ -45,22 +45,37 @@ class AttentionHead(nn.Module):
         """
 
         # The dimension of the key tensor, used to scale the scores.
-        dim_k = None
+        dim_k = k.shape[-1]  # el escalado se hace con la dimensión de cada vector clave
 
         # Calculate the dot product between query and the transpose of key.
         # The result is then scaled by the square root of dim_k.
-        scores = None
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(
+            dim_k
+        )  # [batch_size, seq_len, d_q] x [batch_size, d_k, seq_len] = [batch_size, d_q, d_k]
 
+        # si tiene mask
         if mask is not None:
-            # Apply the causal mask by setting the masked positions to a very large negative value.
-            scores = None
+            if mask.dtype != torch.bool:
+                keep = mask != 0
+            else:
+                keep = mask
 
-        # Apply the softmax function to obtain the attention weights.
-        weights = None
+            if keep.dim() == 2:
+                keep = keep.unsqueeze(0)
+            elif keep.dim() == 4 and keep.size(1) == 1:
+                keep = keep.squeeze(1)
+
+            # Ocultamos posiciones no permitidas
+            scores = scores.masked_fill(~keep, -1e9)
+
+
+        weights = torch.softmax(
+            scores, dim=-1
+        )  # el sofmaz se le aplica a la ultima dimensión
 
         # Compute the output by performing a weighted sum of the value tensor
         # using the attention weights.
-        output = None
+        output = torch.matmul(weights, v)
 
         return output, weights
 
@@ -77,11 +92,13 @@ class AttentionHead(nn.Module):
             Tensor: Output tensor of shape (batch_size, seq_len, d_v).
         """
         # Project input tensor to query, key, and value tensors.
-        q = None
-        k = None
-        v = None
+        q = self.wq(x_q)  # (batch_size, seq_len, d_q)
+        k = self.wk(x_k)  # (batch_size, seq_len, d_k)
+        v = self.wv(x_v)  # (batch_size, seq_len, d_v)
 
-        output, _ = None
+        output, _ = self.scaled_dot_product_attention(
+            q, k, v, mask=mask
+        )  # out: (batch_size, seq_len, d_v)
 
         return output
 
@@ -104,11 +121,15 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, d_model: int, num_attention_heads: int):
         super(MultiHeadAttention, self).__init__()
         assert d_model % num_attention_heads == 0, "d_model must be divisible by num_attention_heads"
-        d_v = None
-        d_k = None
+        d_v = d_model // num_attention_heads  # d_q = d_k = d_v
+        d_k = d_v
 
-        self.heads = None
-        self.output_linear = None
+        self.heads = nn.ModuleList([
+            AttentionHead(d_model=d_model, d_k=d_k, d_q=d_k, d_v=d_v)
+            for _ in range(num_attention_heads)
+        ])
+        # Capa de salida que combina las cabezas (num_heads * d_v = d_model)
+        self.output_linear = nn.Linear(d_model, d_model, bias=False)
 
     def forward(self, x_q, x_k, x_v, mask=None):
         """Forward pass for the multi-head attention layer with optional causal mask.
@@ -123,10 +144,11 @@ class MultiHeadAttention(nn.Module):
             Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # Concatenate the outputs from all attention heads.
-        x = None
+        head_outputs = [head(x_q, x_k, x_v, mask=mask) for head in self.heads]  # cada uno: (B, seq_len_q, d_v)
+        x = torch.cat(head_outputs, dim=-1)  # (B, seq_len_q, num_heads * d_v) == (B, seq_len_q, d_model)
 
         # Apply the linear layer 
-        x = None
+        x = self.output_linear(x)  # (B, seq_len_q, d_model)
         return x
     
 class FeedForward(nn.Module):

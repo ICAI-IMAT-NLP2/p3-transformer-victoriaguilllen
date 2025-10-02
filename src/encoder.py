@@ -27,10 +27,10 @@ class TransformerEncoderLayer(nn.Module):
 
     def __init__(self, d_model: int, num_attention_heads: int, intermediate_size: int):
         super(TransformerEncoderLayer, self).__init__()
-        self.layer_norm_1 = None
-        self.layer_norm_2 = None
-        self.attention = None
-        self.feed_forward = None
+        self.layer_norm_1 = torch.nn.LayerNorm(d_model, eps=1e-5, elementwise_affine=True)
+        self.layer_norm_2 = torch.nn.LayerNorm(d_model, eps=1e-5, elementwise_affine=True)
+        self.attention = MultiHeadAttention(d_model=d_model, num_attention_heads=num_attention_heads)
+        self.feed_forward = FeedForward(d_model=d_model, intermediate_size=intermediate_size)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Transformer encoder layer.
@@ -43,12 +43,34 @@ class TransformerEncoderLayer(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # Apply layer normalization and then apply multi-head attention
-        hidden_state = None
-        x = None
-        
-        # Apply layer normalization and then apply feed-forward network
-        x = None
-        
+        B, S, _ = x.shape
+
+        keep = None
+        if mask is not None:
+            if mask.dtype != torch.bool:
+                pad = mask != 0
+            else:
+                pad = mask
+
+            if pad.dim() == 2:
+                # (B, S) -> (B, S_q, S_k) = (B, S, S)
+                # True donde NO hay padding
+                q_ok = ~pad  # (B, S)
+                keep = q_ok.unsqueeze(1).expand(-1, S, -1)  # (B, S, S)
+            elif pad.dim() == 3:
+                # Si ya viene como (B, S, S) de padding, negamos para obtener keep
+                keep = ~pad
+
+
+        # Pre-LN + MHA (self-attention) 
+        h = self.layer_norm_1(x)
+        attn_out = self.attention(h, h, h, mask=keep)  # (B, S, d_model)
+        y = x + attn_out
+
+        # Pre-LN + FFN 
+        h2 = self.layer_norm_2(y)
+        ff_out = self.feed_forward(h2)
+        x = y + ff_out
         return x
     
 class TransformerEncoder(nn.Module):
@@ -74,8 +96,15 @@ class TransformerEncoder(nn.Module):
                 num_attention_heads: int, intermediate_size: int, num_hidden_layers: int
                 ):
         super(TransformerEncoder, self).__init__()
-        self.embeddings = None
-        self.layers = None
+        self.embeddings = Embeddings(vocab_size, max_position_embeddings, d_model)
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(
+                d_model=d_model,
+                num_attention_heads=num_attention_heads,
+                intermediate_size=intermediate_size,
+            )
+            for _ in range(num_hidden_layers)
+        ])
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Transformer encoder.
@@ -88,9 +117,10 @@ class TransformerEncoder(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # Apply embeddings layer
-        x = None
+        x = self.embeddings(x)
 
         for layer in self.layers:
-            x = layer(x, mask)
+            x = layer(x, mask)  
+
         return x
     
